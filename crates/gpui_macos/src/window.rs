@@ -664,6 +664,7 @@ struct MacWindowState {
     blurred_view: Option<*mut AnyObject>,
     background_appearance: WindowBackgroundAppearance,
     cursor_style: CursorStyle,
+    hidden_cursor: *mut AnyObject,
     cursor_visible: Arc<AtomicBool>,
     frame_source: FrameSource,
     renderer: renderer::Renderer,
@@ -1162,6 +1163,19 @@ impl MacWindow {
             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
 
+            // AppKit's global hide APIs are undone by mouse motion. A transparent
+            // NSCursor keeps hidden cursor styling scoped to this view's cursor rect.
+            let hidden_cursor: *mut AnyObject = msg_send![class!(NSCursor), alloc];
+            let hidden_image: *mut AnyObject = msg_send![class!(NSImage), alloc];
+            let hidden_image: *mut AnyObject = msg_send![hidden_image, initWithSize: NSSize::new(1., 1.)];
+            let hidden_cursor: *mut AnyObject = msg_send![
+                hidden_cursor,
+                initWithImage: hidden_image
+                hotSpot: NSPoint::new(0., 0.)
+            ];
+            let _: () = msg_send![hidden_image, release];
+            assert!(!hidden_cursor.is_null());
+
             let metal_frames = MetalFrameSource::is_available().then(Rc::<MetalFrames>::default);
             let state = Rc::new(Mutex::new(MacWindowState {
                 handle,
@@ -1172,6 +1186,7 @@ impl MacWindow {
                 blurred_view: None,
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 cursor_style: CursorStyle::Arrow,
+                hidden_cursor,
                 cursor_visible,
                 frame_source: match &metal_frames {
                     Some(metal_frames) => FrameSource::Metal(metal_frames.clone()),
@@ -1467,6 +1482,7 @@ impl Drop for MacWindow {
         drop(this.accesskit_adapter.take());
         this.renderer.destroy();
         let window = this.native_window;
+        let hidden_cursor = this.hidden_cursor;
         let sheet_parent = this.sheet_parent.take();
         match &mut this.frame_source {
             FrameSource::Metal(metal_frames) => metal_frames.replace(None),
@@ -1485,6 +1501,7 @@ impl Drop for MacWindow {
                     if let Some(parent) = sheet_parent {
                         let _: () = msg_send![parent, endSheet: window];
                     }
+                    let _: () = msg_send![hidden_cursor, release];
                     let _: () = msg_send![window, close];
                     let _: *mut AnyObject = msg_send![window, autorelease];
                 }
@@ -2752,6 +2769,7 @@ pub(crate) unsafe fn native_cursor(style: CursorStyle) -> *mut AnyObject {
     // SAFETY: Each selector is an `NSCursor` class method returning a cursor.
     unsafe {
         match style {
+            CursorStyle::Hidden => std::ptr::null_mut(),
             CursorStyle::Arrow => msg_send![class!(NSCursor), arrowCursor],
             CursorStyle::IBeam => msg_send![class!(NSCursor), IBeamCursor],
             CursorStyle::Crosshair => msg_send![class!(NSCursor), crosshairCursor],
@@ -2797,15 +2815,19 @@ extern "C" fn reset_cursor_rects(this: &AnyObject, _: Sel) {
         let _: () = msg_send![super(this, class!(NSView)), resetCursorRects];
 
         let window_state = get_window_state(this);
-        let cursor_style = {
-            let lock = window_state.lock();
-            if native_views::native_view_sets_cursor(&lock) {
+        let (cursor_style, hidden_cursor) = {
+            let state = window_state.lock();
+            if native_views::native_view_sets_cursor(&state) {
                 return;
             }
-            lock.cursor_style
+            (state.cursor_style, state.hidden_cursor)
         };
 
-        let cursor = native_cursor(cursor_style);
+        let cursor = if cursor_style == CursorStyle::Hidden {
+            hidden_cursor
+        } else {
+            native_cursor(cursor_style)
+        };
 
         let bounds: NSRect = msg_send![this, bounds];
         let _: () = msg_send![this, addCursorRect: bounds, cursor: cursor];
