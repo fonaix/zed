@@ -9113,6 +9113,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[gpui::test]
     fn test_accessibility_client_uses_platform_callbacks_without_borrowing_app(
         cx: &mut TestAppContext,
@@ -9154,6 +9155,7 @@ mod tests {
         });
     }
 
+    #[cfg(not(target_family = "wasm"))]
     #[gpui::test]
     fn test_accessibility_client_respects_disabled_accessibility(cx: &mut TestAppContext) {
         cx.disable_accessibility();
