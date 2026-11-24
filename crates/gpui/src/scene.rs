@@ -187,7 +187,7 @@ impl Scene {
     fn insert_layer_around_native_views(&mut self, layer: Layer) {
         let mut part = Vec::new();
         for index in layer.primitives.into_iter().flatten() {
-            let PaintOperation::Primitive(primitive) = &self.paint_operations[index] else {
+            let PaintOperation::Primitive(primitive, _) = &self.paint_operations[index] else {
                 continue;
             };
             let primitive = primitive.clone();
@@ -408,7 +408,7 @@ impl Scene {
         }
         let mut first_painted: Vec<(NativeViewId, HitboxId)> = Vec::new();
         for operation in &self.paint_operations {
-            if let PaintOperation::Primitive(Primitive::NativeView(native_view)) = operation
+            if let PaintOperation::Primitive(Primitive::NativeView(native_view), _) = operation
                 && !first_painted.iter().any(|(id, _)| *id == native_view.id)
             {
                 first_painted.push((native_view.id, native_view.hitbox_id));
