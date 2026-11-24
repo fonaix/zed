@@ -1,5 +1,15 @@
 # NyaTerm fork notes
 
+## Upstream synchronization (2026-11-25)
+
+- Upstream base: `05c93905c57a70f4177a59281dd096ddcaf4a3fd` (zed-industries/zed, main).
+- Previous published head: `5591fbd2d0ef56b9469e22216b9a91d833eb8282`.
+- Preserved remote backup: `backup/nyaterm-20261125-5591fbd2`.
+
+Preserve all NyaTerm input, clipboard, overlay, texture and platform patches. Integrate upstream native views with overlay scene classification, deferred content masks and the guarded macOS accessibility adapter. Replace three trim_prefix calls with equivalent strip_prefix fallbacks for NyaTerm Rust 1.99.1. The earlier NVIDIA/AMD DLL helpers remain removed as upstream intended.
+
+Linux x86_64, Rust 1.99.1: GPUI library tests with test-support passed (524 passed, two ignored); gpui_platform/gpui_linux/gpui_wgpu checks passed; both owned-upload lifetime and atomic-validation tests passed. GitHub Actions is disabled for this fork, so dispatch was rejected. Windows/macOS native validation was not run.
+
 ## Current upstream sync (2026-11-14)
 
 - Upstream base: `f0fa51bb510fc91f6da7ec55f3e0f317f1f975ec` (`https://github.com/zed-industries/zed`, `main`).
