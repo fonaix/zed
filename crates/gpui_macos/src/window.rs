@@ -3591,7 +3591,10 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
 
     let (accesskit, is_focused) = {
         let state = window_state.lock();
-        (state.accesskit.clone(), is_active && native_views::gpui_view_is_focused(&state))
+        (
+            state.accesskit.clone(),
+            is_active && native_views::gpui_view_is_focused(&state),
+        )
     };
     let a11y_events = accesskit.and_then(|accesskit| match accesskit.try_borrow_mut() {
         Ok(mut accesskit) => accesskit.adapter.update_view_focus_state(is_focused),

@@ -1347,15 +1347,22 @@ pub(super) fn gpui_view_is_focused(state: &MacWindowState) -> bool {
 /// Tells the accessibility adapter whether the GPUI view is first responder,
 /// which the window does not report correctly while that is changing.
 fn update_accessibility_focus(window_state: &Rc<Mutex<MacWindowState>>, is_first_responder: bool) {
-    let events = {
-        let Some(mut lock) = window_state.try_lock() else {
+    let (accesskit, is_focused) = {
+        let Some(state) = window_state.try_lock() else {
             return;
         };
-        let is_focused = is_first_responder && lock.native_window().isKeyWindow();
-        lock.accesskit_adapter
-            .as_mut()
-            .and_then(|adapter| adapter.update_view_focus_state(is_focused))
+        (
+            state.accesskit.clone(),
+            is_first_responder && state.native_window().isKeyWindow(),
+        )
     };
+    let events = accesskit.and_then(|accesskit| match accesskit.try_borrow_mut() {
+        Ok(mut accesskit) => accesskit.adapter.update_view_focus_state(is_focused),
+        Err(_) => {
+            log::error!("dropped native accessibility focus change during an accessibility query");
+            None
+        }
+    });
     if let Some(events) = events {
         events.raise();
     }
