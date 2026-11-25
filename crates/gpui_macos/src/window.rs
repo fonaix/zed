@@ -670,6 +670,56 @@ enum FrameSource {
     DisplayLink(Option<WindowFrameSource>),
 }
 
+/// Modal sessions started for `WindowKind::Dialog` windows.
+///
+/// `beginModalSessionForWindow:` disables every other window in the app at the
+/// AppKit level, which is what makes a scoped edit truly modal. Unlike a sheet,
+/// the session needs `runModalSession:` to be pumped; the app delegate does that
+/// on a timer added to the common run loop modes (so it also fires while the
+/// modal run loop is active).
+// Stored as addresses: a raw pointer is not `Send`, so a `Mutex` holding one is
+// not `Sync` and cannot back a `static`. All access stays on the main thread.
+static MODAL_SESSIONS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// End a modal session, if it is still live. Returns early for sessions already
+/// ended by the pump, so a late window close cannot end one twice.
+fn end_modal_session(session: *mut AnyObject) {
+    {
+        let mut sessions = MODAL_SESSIONS.lock();
+        let address = session as usize;
+        let Some(index) = sessions.iter().position(|active| *active == address) else {
+            return;
+        };
+        sessions.remove(index);
+    }
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, endModalSession: session];
+    }
+}
+
+/// Pump every live modal session once. Called from the app delegate's timer.
+pub(crate) fn pump_modal_sessions() {
+    let sessions: Vec<usize> = MODAL_SESSIONS.lock().clone();
+    if sessions.is_empty() {
+        return;
+    }
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let mut finished = Vec::new();
+        for address in sessions {
+            let session = address as *mut AnyObject;
+            let response: objc2_app_kit::NSModalResponse = msg_send![app, runModalSession: session];
+            if response != objc2_app_kit::NSModalResponseContinue {
+                finished.push(session);
+            }
+        }
+        for session in finished {
+            end_modal_session(session);
+        }
+    }
+}
+
 struct MacWindowState {
     handle: AnyWindowHandle,
     foreground_executor: ForegroundExecutor,
@@ -732,8 +782,8 @@ struct MacWindowState {
     // query accessibility while the lock is already held further up the stack, and
     // raising AccessKit events can synchronously trigger more queries.
     accesskit: Option<Rc<RefCell<AccessKitState>>>,
-    // The parent window if this window is a sheet (Dialog kind)
-    sheet_parent: Option<*mut AnyObject>,
+    // The AppKit modal session if this window is a Dialog. Ended on close.
+    modal_session: Option<*mut AnyObject>,
     native_views: native_views::NativeViews,
 }
 
@@ -1119,7 +1169,13 @@ impl MacWindow {
                     style_mask |= NSWindowStyleMask::NonactivatingPanel;
                     msg_send![PANEL_CLASS, alloc]
                 }
-                WindowKind::Floating | WindowKind::Dialog => {
+                // A dialog must be a real NSWindow: an NSPanel is what AppKit
+                // uses for a sheet, and sheets get no traffic lights. Modality
+                // now comes from an AppKit modal session instead.
+                WindowKind::Dialog => {
+                    msg_send![WINDOW_CLASS, alloc]
+                }
+                WindowKind::Floating => {
                     msg_send![PANEL_CLASS, alloc]
                 }
             };
@@ -1256,7 +1312,7 @@ impl MacWindow {
                 activated_least_once: false,
                 closed: Arc::new(AtomicBool::new(false)),
                 accesskit: None,
-                sheet_parent: None,
+                modal_session: None,
                 native_views: native_views::NativeViews::default(),
             }));
             let mut window = Self(state, marker, metal_frames);
@@ -1318,7 +1374,7 @@ impl MacWindow {
 
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
             let main_window: *mut AnyObject = msg_send![app, mainWindow];
-            let mut sheet_parent = None;
+            let mut modal_session = None;
 
             // SAFETY: This is the live GPUIView (an NSView subclass) added to the
             // content view above, and window creation runs on the main thread.
@@ -1357,18 +1413,14 @@ impl MacWindow {
                             | NSWindowCollectionBehavior::FullScreenAuxiliary];
                 }
                 WindowKind::Dialog => {
-                    if !main_window.is_null() {
-                        let parent = {
-                            let active_sheet: *mut AnyObject =
-                                msg_send![main_window, attachedSheet];
-                            if active_sheet.is_null() {
-                                main_window
-                            } else {
-                                active_sheet
-                            }
-                        };
-                        let _: () = msg_send![parent, beginSheet: native_window, completionHandler: None::<&block2::Block<dyn Fn(NSInteger)>>];
-                        sheet_parent = Some(parent);
+                    // A modal session disables the rest of the app at the system
+                    // level while leaving this a normal, titled NSWindow with
+                    // traffic lights. It is pumped by the app delegate timer.
+                    let session: *mut AnyObject =
+                        msg_send![app, beginModalSessionForWindow: native_window];
+                    if !session.is_null() {
+                        MODAL_SESSIONS.lock().push(session as usize);
+                        modal_session = Some(session);
                     }
                 }
             }
@@ -1419,7 +1471,7 @@ impl MacWindow {
             {
                 let mut window_state = window.0.lock();
                 window_state.move_traffic_light();
-                window_state.sheet_parent = sheet_parent;
+                window_state.modal_session = modal_session;
             }
 
             Ok(window)
@@ -1501,7 +1553,7 @@ impl Drop for MacWindow {
         this.renderer.destroy();
         let window = this.native_window;
         let hidden_cursor = this.hidden_cursor;
-        let sheet_parent = this.sheet_parent.take();
+        let modal_session = this.modal_session.take();
         match &mut this.frame_source {
             FrameSource::Metal(metal_frames) => metal_frames.replace(None),
             FrameSource::DisplayLink(frame_source) => drop(frame_source.take()),
@@ -1516,8 +1568,8 @@ impl Drop for MacWindow {
         this.foreground_executor
             .spawn(async move {
                 unsafe {
-                    if let Some(parent) = sheet_parent {
-                        let _: () = msg_send![parent, endSheet: window];
+                    if let Some(session) = modal_session {
+                        end_modal_session(session);
                     }
                     let _: () = msg_send![hidden_cursor, release];
                     let _: () = msg_send![window, close];

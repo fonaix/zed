@@ -98,6 +98,13 @@ unsafe fn build_classes() {
                 sel!(handleGPUIMenuItem:),
                 handle_menu_item as extern "C-unwind" fn(_, Sel, *mut AnyObject),
             );
+            // Drives AppKit modal sessions started for Dialog windows. A timer is
+            // used because `runModalSession:` must be pumped repeatedly while
+            // `[NSApp run]` owns the event loop.
+            decl.add_method(
+                sel!(pumpModalSessions),
+                pump_modal_sessions as extern "C-unwind" fn(_, Sel),
+            );
             // Add menu item handlers so that OS save panels have the correct key commands
             decl.add_method(
                 sel!(cut:),
@@ -554,6 +561,25 @@ impl Platform for MacPlatform {
             }
             let app_delegate: *mut AnyObject = msg_send![APP_DELEGATE_CLASS, new];
             let _: () = msg_send![app, setDelegate: app_delegate];
+
+            // `beginModalSessionForWindow:` sets app-level modality but does not
+            // run the session; AppKit only does that when `runModalSession:` is
+            // called. Pump from a timer in the common modes so it keeps firing
+            // inside the modal run loop too.
+            let timer: *mut AnyObject = msg_send![
+                class!(NSTimer),
+                scheduledTimerWithTimeInterval: 1.0 / 60.0,
+                target: app_delegate,
+                selector: sel!(pumpModalSessions),
+                userInfo: ptr::null_mut::<AnyObject>(),
+                repeats: Bool::YES
+            ];
+            let run_loop: *mut AnyObject = msg_send![class!(NSRunLoop), currentRunLoop];
+            let _: () = msg_send![
+                run_loop,
+                addTimer: timer,
+                forMode: objc2_foundation::NSRunLoopCommonModes
+            ];
 
             let self_ptr = self as *const Self as *mut c_void;
             mac_platform_ivar(&*app)
@@ -1338,6 +1364,12 @@ fn mac_platform_ivar(object: &AnyObject) -> &Ivar {
         "platform ivar has an unexpected type encoding"
     );
     ivar
+}
+
+/// Timer callback: give every live AppKit modal session a chance to process
+/// events and report whether it has finished.
+extern "C-unwind" fn pump_modal_sessions(_this: &AnyObject, _: Sel) {
+    crate::window::pump_modal_sessions();
 }
 
 extern "C-unwind" fn will_finish_launching(_this: &AnyObject, _: Sel, _: *mut AnyObject) {
